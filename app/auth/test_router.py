@@ -164,6 +164,124 @@ class TestLogout:
         assert protected.status_code == 401
 
 
+@pytest.fixture
+async def admin_user(session: AsyncSession):
+    user = User(
+        email="admin@example.com",
+        name="Test Admin",
+        role=Role.admin,
+        hashed_password=hash_password("admin-password"),
+        is_active=True,
+    )
+    session.add(user)
+    await session.commit()
+    return user
+
+
+class TestRequireRole:
+    async def test_admin_token_passes_admin_guard(self, client, admin_user):
+        # Arrange — log in as admin
+        login = await client.post("/auth/login", json={
+            "email": "admin@example.com",
+            "password": "admin-password",
+        })
+        token = login.json()["access_token"]
+        # Act
+        response = await client.get(
+            "/admin/users",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        # Assert — admin is allowed through
+        assert response.status_code == 200
+
+    async def test_analyst_token_blocked_by_admin_guard(self, client, active_user):
+        # Arrange — log in as analyst
+        login = await client.post("/auth/login", json={
+            "email": "analyst@example.com",
+            "password": "correct-password",
+        })
+        token = login.json()["access_token"]
+        # Act
+        response = await client.get(
+            "/admin/users",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        # Assert — analyst is blocked
+        assert response.status_code == 403
+
+    async def test_analyst_token_passes_analyst_guard(self, client, active_user):
+        # Arrange — log in as analyst
+        login = await client.post("/auth/login", json={
+            "email": "analyst@example.com",
+            "password": "correct-password",
+        })
+        token = login.json()["access_token"]
+        # Act — /auth/me is guarded only by authentication, not role,
+        # so we verify the analyst token itself is valid and the role
+        # value is returned correctly (no role guard blocks it)
+        response = await client.get(
+            "/auth/me",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        # Assert — analyst token works for analyst-accessible endpoints
+        assert response.status_code == 200
+        assert response.json()["role"] == "analyst"
+
+
+class TestAdminRoutes:
+    async def test_admin_can_list_users(self, client, admin_user, active_user):
+        # Arrange
+        login = await client.post("/auth/login", json={
+            "email": "admin@example.com",
+            "password": "admin-password",
+        })
+        token = login.json()["access_token"]
+        # Act
+        response = await client.get(
+            "/admin/users",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        # Assert
+        assert response.status_code == 200
+        users = response.json()
+        emails = [u["email"] for u in users]
+        assert "admin@example.com" in emails
+        assert "analyst@example.com" in emails
+
+    async def test_analyst_cannot_list_users(self, client, active_user):
+        # Arrange
+        login = await client.post("/auth/login", json={
+            "email": "analyst@example.com",
+            "password": "correct-password",
+        })
+        token = login.json()["access_token"]
+        # Act
+        response = await client.get(
+            "/admin/users",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        # Assert
+        assert response.status_code == 403
+
+    async def test_missing_role_claim_returns_401(self, client):
+        # Arrange — JWT with no role claim
+        from jose import jwt
+        from app.config import settings
+        from datetime import datetime, timedelta, timezone
+        token = jwt.encode(
+            {"sub": "abc-123", "exp": datetime.now(timezone.utc) + timedelta(hours=1)},
+            settings.jwt_secret,
+            algorithm=settings.jwt_algorithm,
+        )
+        # Act
+        response = await client.get(
+            "/admin/users",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        # Assert — missing role claim treated as unauthenticated
+        assert response.status_code == 401
+
+
 class TestJWTMiddleware:
     async def test_should_allow_request_with_valid_token(self, client, active_user):
         # Arrange

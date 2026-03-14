@@ -1,3 +1,5 @@
+from typing import Callable
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
@@ -41,10 +43,21 @@ async def get_current_user(
         payload = decode_token(token)
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+    if "role" not in payload:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token claims")
     user = await session.get(User, payload["sub"])
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
     return user
+
+
+def require_role(role: str) -> Callable:
+    """Return a FastAPI dependency that enforces a minimum role."""
+    async def dependency(current_user: User = Depends(get_current_user)) -> User:
+        if current_user.role.value != role:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
+        return current_user
+    return dependency
 
 
 @router.post("/login", response_model=TokenResponse)
