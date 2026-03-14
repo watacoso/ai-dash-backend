@@ -4,6 +4,7 @@ Run: python -m app.auth.db_create
 """
 import asyncio
 from app.auth.models import Base
+from app.connections.models import Connection  # registers with Base.metadata  # noqa: F401
 from app.database import engine
 
 

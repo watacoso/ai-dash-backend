@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     jwt_secret: str = "test-secret"
     jwt_algorithm: str = "HS256"
     jwt_expiry_seconds: int = 3600
+    encryption_key: str  # required — no default; startup fails if missing
 
 
 settings = Settings()
