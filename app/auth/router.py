@@ -1,6 +1,6 @@
 from typing import Callable
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -8,11 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.models import User
 from app.auth.service import create_token, decode_token, verify_password
+from app.config import settings
 from app.database import get_session
 from app.redis import add_to_blocklist, is_blocklisted
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 bearer = HTTPBearer(auto_error=False)
+
+_COOKIE_NAME = "access_token"
 
 _INVALID_CREDENTIALS = HTTPException(
     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -31,12 +34,17 @@ class TokenResponse(BaseModel):
 
 
 async def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(bearer),
     session: AsyncSession = Depends(get_session),
 ) -> User:
-    if not credentials:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
-    token = credentials.credentials
+    # Prefer cookie; fall back to Bearer header
+    token = request.cookies.get(_COOKIE_NAME)
+    if not token:
+        if not credentials:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+        token = credentials.credentials
+
     if await is_blocklisted(token):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token revoked")
     try:
@@ -61,20 +69,41 @@ def require_role(role: str) -> Callable:
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(body: LoginRequest, session: AsyncSession = Depends(get_session)):
+async def login(body: LoginRequest, response: Response, session: AsyncSession = Depends(get_session)):
     result = await session.execute(select(User).where(User.email == body.email))
     user = result.scalar_one_or_none()
     if not user or not user.is_active or not verify_password(body.password, user.hashed_password):
         raise _INVALID_CREDENTIALS
     token = create_token(str(user.id), user.role.value)
+    response.set_cookie(
+        key=_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        samesite="strict",
+        max_age=settings.jwt_expiry_seconds,
+        path="/",
+    )
     return TokenResponse(access_token=token)
 
 
 @router.post("/logout", status_code=status.HTTP_200_OK)
-async def logout(credentials: HTTPAuthorizationCredentials = Depends(bearer)):
-    if not credentials:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
-    await add_to_blocklist(credentials.credentials)
+async def logout(request: Request, response: Response,
+                 credentials: HTTPAuthorizationCredentials = Depends(bearer)):
+    # Blocklist whichever token we can find
+    token = request.cookies.get(_COOKIE_NAME)
+    if not token:
+        if not credentials:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+        token = credentials.credentials
+    await add_to_blocklist(token)
+    response.set_cookie(
+        key=_COOKIE_NAME,
+        value="",
+        httponly=True,
+        samesite="strict",
+        max_age=0,
+        path="/",
+    )
     return {"detail": "Logged out"}
 
 

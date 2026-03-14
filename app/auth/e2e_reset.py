@@ -1,7 +1,8 @@
 """
-Reset DB to a clean E2E baseline.
+Reset DB and Redis to a clean E2E baseline.
 - Restores analyst@example.com and admin@example.com to their default state.
 - Removes any users created during E2E tests (invite-created users).
+- Flushes Redis used_invite keys.
 
 Run: python -m app.auth.e2e_reset
 """
@@ -11,6 +12,7 @@ from app.database import AsyncSessionLocal
 from app.auth.models import Base, User, Role
 from app.auth.service import hash_password
 from app.database import engine
+from app.redis import get_redis
 
 SEED_USERS = [
     ("analyst@example.com", "Test Analyst", Role.analyst, "password123"),
@@ -24,15 +26,24 @@ async def e2e_reset() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
+    # Flush Redis invite keys (and blocklist) so invite tests are repeatable
+    r = get_redis()
+    invite_keys = await r.keys("used_invite:*")
+    blocklist_keys = await r.keys("blocklist:*")
+    keys_to_del = invite_keys + blocklist_keys
+    if keys_to_del:
+        await r.delete(*keys_to_del)
+        print(f"Redis: cleared {len(keys_to_del)} key(s)")
+
     async with AsyncSessionLocal() as session:
-        # Remove non-seed users (created by invite during E2E)
+        # Remove non-seed users
         result = await session.execute(select(User))
         for user in result.scalars().all():
             if user.email not in SEED_EMAILS:
                 await session.delete(user)
                 print(f"Removed: {user.email}")
 
-        # Restore seed users to default state
+        # Restore seed users
         for email, name, role, password in SEED_USERS:
             result = await session.execute(select(User).where(User.email == email))
             user = result.scalar_one_or_none()
