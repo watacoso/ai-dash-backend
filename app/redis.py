@@ -1,6 +1,10 @@
+import hashlib
+
 import redis.asyncio as aioredis
 
 from app.config import settings
+
+_INVITE_TTL_SECONDS = 48 * 3600
 
 _client: aioredis.Redis | None = None
 
@@ -20,3 +24,15 @@ async def add_to_blocklist(token: str) -> None:
 async def is_blocklisted(token: str) -> bool:
     r = get_redis()
     return await r.exists(f"blocklist:{token}") == 1
+
+
+async def mark_invite_used(token: str) -> None:
+    r = get_redis()
+    key = f"used_invite:{hashlib.sha256(token.encode()).hexdigest()}"
+    await r.setex(key, _INVITE_TTL_SECONDS, "1")
+
+
+async def is_invite_used(token: str) -> bool:
+    r = get_redis()
+    key = f"used_invite:{hashlib.sha256(token.encode()).hexdigest()}"
+    return await r.exists(key) == 1
