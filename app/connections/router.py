@@ -1,6 +1,9 @@
+import asyncio
 import uuid
 from typing import Any
 
+import anthropic
+import snowflake.connector.errors
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, model_validator
 from sqlalchemy import select
@@ -9,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.models import User
 from app.auth.router import get_current_user, require_role
 from app.connections.models import Connection, ConnectionType
+from app.connections.probe import run_snowflake_probe, run_claude_probe
 from app.database import get_session
 
 router = APIRouter(prefix="/connections", tags=["connections"])
@@ -176,3 +180,38 @@ async def delete_connection(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
     conn.is_active = False
     await session.commit()
+
+
+# ── POST /connections/{id}/test ────────────────────────────────────────────────
+
+class TestResult(BaseModel):
+    ok: bool
+    latency_ms: int | None = None
+    error: str | None = None
+
+
+@router.post("/{connection_id}/test", response_model=TestResult, response_model_exclude_none=True)
+async def test_connection(
+    connection_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    _: User = Depends(require_role("admin")),
+):
+    conn = await session.get(Connection, connection_id)
+    if not conn:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
+
+    creds = conn.credentials or {}
+    try:
+        if conn.type == ConnectionType.snowflake:
+            result = await run_snowflake_probe(creds)
+        else:
+            result = await run_claude_probe(creds)
+        return TestResult(**result)
+    except asyncio.TimeoutError:
+        return TestResult(ok=False, error="timeout")
+    except snowflake.connector.errors.DatabaseError as exc:
+        return TestResult(ok=False, error=str(exc))
+    except (anthropic.AuthenticationError, anthropic.NotFoundError) as exc:
+        return TestResult(ok=False, error=str(exc))
+    except Exception as exc:
+        return TestResult(ok=False, error=str(exc))
