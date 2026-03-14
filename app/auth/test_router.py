@@ -323,12 +323,9 @@ class TestJWTMiddleware:
         assert response.status_code == 401
 
     async def test_should_reject_request_with_tampered_token(self, client, active_user):
-        # Arrange
-        login = await client.post("/auth/login", json={
-            "email": "analyst@example.com",
-            "password": "correct-password",
-        })
-        token = login.json()["access_token"]
+        # Arrange — generate token directly to avoid cookie being set on the client
+        from app.auth.service import create_token
+        token = create_token(str(active_user.id), active_user.role.value)
         tampered = token[:-4] + "xxxx"
         # Act
         response = await client.get(
@@ -336,4 +333,76 @@ class TestJWTMiddleware:
             headers={"Authorization": f"Bearer {tampered}"},
         )
         # Assert
+        assert response.status_code == 401
+
+
+class TestCookieAuth:
+    async def test_login_sets_httponly_cookie(self, client, active_user):
+        response = await client.post("/auth/login", json={
+            "email": "analyst@example.com",
+            "password": "correct-password",
+        })
+        assert response.status_code == 200
+        cookie = response.headers.get("set-cookie", "")
+        assert "access_token" in cookie
+        assert "HttpOnly" in cookie
+        assert "samesite=strict" in cookie.lower()
+
+    async def test_login_still_returns_token_in_body(self, client, active_user):
+        # Backwards compat: body still contains access_token
+        response = await client.post("/auth/login", json={
+            "email": "analyst@example.com",
+            "password": "correct-password",
+        })
+        assert response.status_code == 200
+        assert "access_token" in response.json()
+
+    async def test_logout_clears_cookie(self, client, active_user):
+        # Login first
+        login = await client.post("/auth/login", json={
+            "email": "analyst@example.com",
+            "password": "correct-password",
+        })
+        token = login.json()["access_token"]
+        # Logout via bearer
+        response = await client.post(
+            "/auth/logout",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+        cookie = response.headers.get("set-cookie", "")
+        assert "access_token" in cookie
+        # Cookie should be expired/cleared (Max-Age=0 or expires in the past)
+        assert "max-age=0" in cookie.lower() or "expires=" in cookie.lower()
+
+    async def test_me_works_with_cookie(self, client, active_user):
+        # Login to get cookie
+        login = await client.post("/auth/login", json={
+            "email": "analyst@example.com",
+            "password": "correct-password",
+        })
+        token = login.json()["access_token"]
+        # Call /auth/me using cookie (no Authorization header)
+        response = await client.get(
+            "/auth/me",
+            cookies={"access_token": token},
+        )
+        assert response.status_code == 200
+        assert response.json()["email"] == "analyst@example.com"
+
+    async def test_me_falls_back_to_bearer(self, client, active_user):
+        # Bearer still works (no cookie)
+        login = await client.post("/auth/login", json={
+            "email": "analyst@example.com",
+            "password": "correct-password",
+        })
+        token = login.json()["access_token"]
+        response = await client.get(
+            "/auth/me",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+
+    async def test_me_returns_401_with_neither_cookie_nor_bearer(self, client):
+        response = await client.get("/auth/me")
         assert response.status_code == 401
