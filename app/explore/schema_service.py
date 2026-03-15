@@ -40,23 +40,27 @@ class SnowflakeSchemaService:
             database=self._creds.get("database"),
         )
 
-    def _query(self, sql: str) -> list[str]:
+    def _query(self, sql: str, col: int = 1) -> list[str]:
         conn = self._connect()
         try:
             with conn.cursor() as cur:
                 cur.execute(sql)
-                return [row[0] for row in cur.fetchall()]
+                return [str(row[col]) for row in cur.fetchall()]
         finally:
             conn.close()
 
     def list_databases(self) -> list[str]:
-        return self._query("SHOW DATABASES")
+        # SHOW DATABASES: col 0 = created_on, col 1 = name
+        return self._query("SHOW DATABASES", col=1)
 
     def list_schemas(self, database: str) -> list[str]:
-        return self._query(f"SHOW SCHEMAS IN DATABASE {database}")
+        # SHOW SCHEMAS: col 0 = created_on, col 1 = name
+        return self._query(f"SHOW SCHEMAS IN DATABASE {database}", col=1)
 
     def list_tables(self, database: str, schema: str) -> list[str]:
-        return self._query(f"SHOW TABLES IN SCHEMA {database}.{schema}")
+        # SHOW TABLES: col 0 = created_on, col 1 = name
+        return self._query(f"SHOW TABLES IN SCHEMA {database}.{schema}", col=1)
 
     def list_columns(self, database: str, schema: str, table: str) -> list[str]:
-        return self._query(f"SHOW COLUMNS IN TABLE {database}.{schema}.{table}")
+        # SHOW COLUMNS: col 0 = column_name (no created_on prefix)
+        return self._query(f"SHOW COLUMNS IN TABLE {database}.{schema}.{table}", col=0)

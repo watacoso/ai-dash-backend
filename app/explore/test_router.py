@@ -143,7 +143,7 @@ def _mock_sf(mocker, rows: list[tuple]):
 class TestSchemaEndpoint:
     async def test_should_return_databases(self, client, admin_token, sf_connection, mocker):
         # Arrange
-        _mock_sf(mocker, [("DB1",), ("DB2",)])
+        _mock_sf(mocker, [(None, "DB1"), (None, "DB2")])
         # Act
         res = await client.get(
             f"/explore/schema?connection_id={sf_connection.id}&level=databases",
@@ -155,7 +155,7 @@ class TestSchemaEndpoint:
 
     async def test_should_return_schemas_for_database(self, client, admin_token, sf_connection, mocker):
         # Arrange
-        _mock_sf(mocker, [("PUBLIC",), ("RAW",)])
+        _mock_sf(mocker, [(None, "PUBLIC"), (None, "RAW")])
         # Act
         res = await client.get(
             f"/explore/schema?connection_id={sf_connection.id}&level=schemas&database=MYDB",
@@ -167,7 +167,7 @@ class TestSchemaEndpoint:
 
     async def test_should_return_tables_for_schema(self, client, admin_token, sf_connection, mocker):
         # Arrange
-        _mock_sf(mocker, [("ORDERS",)])
+        _mock_sf(mocker, [(None, "ORDERS")])
         # Act
         res = await client.get(
             f"/explore/schema?connection_id={sf_connection.id}&level=tables&database=MYDB&schema=PUBLIC",
@@ -275,7 +275,7 @@ class TestSchemaEndpoint:
 
     async def test_should_allow_analyst_role(self, client, analyst_token, sf_connection, mocker):
         # Arrange
-        _mock_sf(mocker, [("DB1",)])
+        _mock_sf(mocker, [(None, "DB1")])
         # Act
         res = await client.get(
             f"/explore/schema?connection_id={sf_connection.id}&level=databases",
@@ -369,7 +369,7 @@ class TestChatEndpoint:
             "app.explore.router.anthropic.Anthropic",
             return_value=MagicMock(messages=MagicMock(create=mock_create)),
         )
-        _mock_sf(mocker, [("DB1",), ("DB2",)])
+        _mock_sf(mocker, [(None, "DB1"), (None, "DB2")])
         payload = {
             "snowflake_connection_id": str(sf_connection.id),
             "claude_connection_id": str(claude_connection.id),
@@ -494,7 +494,7 @@ class TestChatEndpoint:
             "app.explore.router.anthropic.Anthropic",
             return_value=MagicMock(messages=MagicMock(create=mock_create)),
         )
-        _mock_sf(mocker, [("DB1",)])
+        _mock_sf(mocker, [(None, "DB1")])
         payload = {
             "snowflake_connection_id": str(sf_connection.id),
             "claude_connection_id": str(claude_connection.id),
