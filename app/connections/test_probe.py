@@ -147,7 +147,8 @@ class TestSnowflakeProbe:
         mock_sf_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
         mock_sf_conn.close.return_value = None
 
-        with patch("app.connections.probe.snowflake.connector.connect", return_value=mock_sf_conn):
+        with patch("app.connections.probe._load_private_key_bytes", return_value=b"fake-key"), \
+             patch("app.connections.probe.snowflake.connector.connect", return_value=mock_sf_conn):
             res = await client.post(
                 f"/connections/{snowflake_conn.id}/test",
                 cookies={"access_token": admin_token},

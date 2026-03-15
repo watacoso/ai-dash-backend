@@ -5,6 +5,20 @@ The router runs them in a thread-pool executor.
 """
 import snowflake.connector
 import snowflake.connector.errors
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.serialization import (
+    Encoding, NoEncryption, PrivateFormat, load_pem_private_key,
+)
+
+
+def _load_private_key_bytes(pem: str, passphrase: str | None) -> bytes:
+    password = passphrase.encode() if passphrase else None
+    key = load_pem_private_key(pem.encode(), password=password, backend=default_backend())
+    return key.private_bytes(
+        encoding=Encoding.DER,
+        format=PrivateFormat.PKCS8,
+        encryption_algorithm=NoEncryption(),
+    )
 
 
 class SnowflakeSchemaService:
@@ -12,13 +26,16 @@ class SnowflakeSchemaService:
         self._creds = credentials
 
     def _connect(self):
+        private_key_bytes = _load_private_key_bytes(
+            self._creds["private_key"],
+            self._creds.get("passphrase"),
+        )
         return snowflake.connector.connect(
             account=self._creds["account"],
             user=self._creds["username"],
-            private_key=self._creds["private_key"].encode(),
+            private_key=private_key_bytes,
             warehouse=self._creds.get("warehouse"),
             database=self._creds.get("database"),
-            schema=self._creds.get("schema"),
         )
 
     def _query(self, sql: str) -> list[str]:

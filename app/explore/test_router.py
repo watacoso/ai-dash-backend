@@ -128,7 +128,8 @@ async def sf_connection(session: AsyncSession, admin_user: User):
 
 
 def _mock_sf(mocker, rows: list[tuple]):
-    """Patch snowflake.connector.connect to return rows from cursor.fetchall."""
+    """Patch snowflake key loader and connector to return rows from cursor.fetchall."""
+    mocker.patch("app.explore.schema_service._load_private_key_bytes", return_value=b"fake-key")
     cursor = mocker.MagicMock()
     cursor.__enter__ = mocker.MagicMock(return_value=cursor)
     cursor.__exit__ = mocker.MagicMock(return_value=False)
@@ -250,6 +251,7 @@ class TestSchemaEndpoint:
         self, client, admin_token, sf_connection, mocker
     ):
         # Arrange
+        mocker.patch("app.explore.schema_service._load_private_key_bytes", return_value=b"fake-key")
         mocker.patch(
             "app.explore.schema_service.snowflake.connector.connect",
             side_effect=snowflake.connector.errors.DatabaseError("auth failed"),
@@ -463,6 +465,7 @@ class TestChatEndpoint:
             "app.explore.router.anthropic.Anthropic",
             return_value=MagicMock(messages=MagicMock(create=mock_create)),
         )
+        mocker.patch("app.explore.schema_service._load_private_key_bytes", return_value=b"fake-key")
         mocker.patch(
             "app.explore.schema_service.snowflake.connector.connect",
             side_effect=snowflake.connector.errors.DatabaseError("connection refused"),

@@ -26,6 +26,7 @@ class SnowflakeCredentials(BaseModel):
     private_key: str
     warehouse: str
     database: str
+    passphrase: str | None = None
     schema_name: str = ""  # mapped from "schema" key
 
     model_config = {"populate_by_name": True}

@@ -1,6 +1,6 @@
 """
 Unit tests for SnowflakeSchemaService.
-snowflake.connector.connect is mocked at the module level.
+snowflake.connector.connect and _load_private_key_bytes are mocked at the module level.
 """
 import pytest
 import snowflake.connector.errors
@@ -14,7 +14,6 @@ CREDS = {
     "private_key": "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----",
     "warehouse": "WH",
     "database": "DB",
-    "schema": "PUBLIC",
 }
 
 
@@ -30,6 +29,11 @@ def _mock_conn(rows: list[tuple]) -> MagicMock:
 
 
 class TestSnowflakeSchemaService:
+    @pytest.fixture(autouse=True)
+    def mock_key_loader(self):
+        with patch("app.explore.schema_service._load_private_key_bytes", return_value=b"fake-key"):
+            yield
+
     def test_should_return_database_names(self):
         # Arrange
         conn = _mock_conn([("DB1",), ("DB2",)])
