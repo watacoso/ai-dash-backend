@@ -12,6 +12,8 @@ from cryptography.hazmat.primitives.serialization import (
 
 
 def _load_private_key_bytes(pem: str, passphrase: str | None) -> bytes:
+    # Normalize literal \n sequences that survive JSON round-trips via some clients
+    pem = pem.replace("\\n", "\n").strip()
     password = passphrase.encode() if passphrase else None
     key = load_pem_private_key(pem.encode(), password=password, backend=default_backend())
     return key.private_bytes(
