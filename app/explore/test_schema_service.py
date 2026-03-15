@@ -65,7 +65,7 @@ class TestSnowflakeSchemaService:
         assert result == ["ORDERS", "USERS"]
 
     def test_should_return_column_names_for_table(self):
-        # Arrange — SHOW COLUMNS: col 0 = column_name (no created_on prefix)
+        # Arrange — INFORMATION_SCHEMA.COLUMNS SELECT: col 0 = COLUMN_NAME
         conn = _mock_conn([("id",), ("amount",), ("created_at",)])
         with patch("app.explore.schema_service.snowflake.connector.connect", return_value=conn):
             svc = SnowflakeSchemaService(CREDS)
@@ -73,6 +73,41 @@ class TestSnowflakeSchemaService:
             result = svc.list_columns("MYDB", "PUBLIC", "ORDERS")
         # Assert
         assert result == ["id", "amount", "created_at"]
+
+    def test_should_pass_correct_params_to_column_query(self):
+        # Arrange
+        conn = _mock_conn([("id",)])
+        with patch("app.explore.schema_service.snowflake.connector.connect", return_value=conn):
+            svc = SnowflakeSchemaService(CREDS)
+            # Act
+            svc.list_columns("MYDB", "PUBLIC", "ORDERS")
+        # Assert — must use INFORMATION_SCHEMA SELECT with correct identifiers
+        executed_sql: str = conn.cursor.return_value.execute.call_args[0][0]
+        assert "INFORMATION_SCHEMA" in executed_sql
+        assert "MYDB" in executed_sql
+        assert "PUBLIC" in executed_sql
+        assert "ORDERS" in executed_sql
+
+    def test_should_return_empty_list_when_table_has_no_columns(self):
+        # Arrange
+        conn = _mock_conn([])
+        with patch("app.explore.schema_service.snowflake.connector.connect", return_value=conn):
+            svc = SnowflakeSchemaService(CREDS)
+            # Act
+            result = svc.list_columns("MYDB", "PUBLIC", "EMPTY_TABLE")
+        # Assert
+        assert result == []
+
+    def test_should_propagate_database_error_from_list_columns(self):
+        # Arrange
+        with patch(
+            "app.explore.schema_service.snowflake.connector.connect",
+            side_effect=snowflake.connector.errors.DatabaseError("permission denied"),
+        ):
+            svc = SnowflakeSchemaService(CREDS)
+            # Act / Assert
+            with pytest.raises(snowflake.connector.errors.DatabaseError):
+                svc.list_columns("MYDB", "PUBLIC", "ORDERS")
 
     def test_should_propagate_database_error(self):
         # Arrange
