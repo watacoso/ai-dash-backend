@@ -62,5 +62,10 @@ class SnowflakeSchemaService:
         return self._query(f"SHOW TABLES IN SCHEMA {database}.{schema}", col=1)
 
     def list_columns(self, database: str, schema: str, table: str) -> list[str]:
-        # SHOW COLUMNS: col 0 = column_name (no created_on prefix)
-        return self._query(f"SHOW COLUMNS IN TABLE {database}.{schema}.{table}", col=0)
+        # INFORMATION_SCHEMA.COLUMNS SELECT: col 0 = COLUMN_NAME, ordered by position
+        sql = (
+            f"SELECT COLUMN_NAME FROM {database}.INFORMATION_SCHEMA.COLUMNS "
+            f"WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = '{table}' "
+            f"ORDER BY ORDINAL_POSITION"
+        )
+        return self._query(sql, col=0)
