@@ -1,8 +1,9 @@
 """
-Unit/integration tests for GET /explore/schema.
-Uses real test DB for connection fixtures; mocks snowflake.connector.connect.
+Unit/integration tests for GET /explore/schema and POST /explore/chat.
+Uses real test DB for connection fixtures; mocks external clients.
 """
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
 import snowflake.connector.errors
@@ -277,6 +278,270 @@ class TestSchemaEndpoint:
         res = await client.get(
             f"/explore/schema?connection_id={sf_connection.id}&level=databases",
             cookies={"access_token": analyst_token},
+        )
+        # Assert
+        assert res.status_code == 200
+
+
+CLAUDE_CREDS = {
+    "api_key": "sk-ant-test",
+    "model": "claude-sonnet-4-6",
+}
+
+
+def _make_text_response(text: str) -> MagicMock:
+    """Anthropic response with stop_reason=end_turn and a text block."""
+    block = MagicMock()
+    block.type = "text"
+    block.text = text
+    resp = MagicMock()
+    resp.stop_reason = "end_turn"
+    resp.content = [block]
+    return resp
+
+
+def _make_tool_use_response(tool_use_id: str, tool_name: str, tool_input: dict) -> MagicMock:
+    """Anthropic response with stop_reason=tool_use and a tool_use block."""
+    block = MagicMock()
+    block.type = "tool_use"
+    block.id = tool_use_id
+    block.name = tool_name
+    block.input = tool_input
+    resp = MagicMock()
+    resp.stop_reason = "tool_use"
+    resp.content = [block]
+    return resp
+
+
+@pytest.fixture
+async def claude_connection(session: AsyncSession, admin_user: User):
+    conn = Connection(
+        name="test-claude",
+        type=ConnectionType.claude,
+        owner_id=admin_user.id,
+        credentials=CLAUDE_CREDS,
+        is_active=True,
+    )
+    session.add(conn)
+    await session.commit()
+    await session.refresh(conn)
+    return conn
+
+
+class TestChatEndpoint:
+    async def test_should_return_assistant_message_when_no_tool_call(
+        self, client, analyst_token, sf_connection, claude_connection, mocker
+    ):
+        # Arrange
+        mocker.patch(
+            "app.explore.router.anthropic.Anthropic",
+            return_value=MagicMock(
+                messages=MagicMock(
+                    create=MagicMock(return_value=_make_text_response("Here are your results."))
+                )
+            ),
+        )
+        payload = {
+            "snowflake_connection_id": str(sf_connection.id),
+            "claude_connection_id": str(claude_connection.id),
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        # Act
+        res = await client.post(
+            "/explore/chat",
+            json=payload,
+            cookies={"access_token": analyst_token},
+        )
+        # Assert
+        assert res.status_code == 200
+        assert res.json() == {"role": "assistant", "content": "Here are your results."}
+
+    async def test_should_return_assistant_message_after_one_tool_call(
+        self, client, analyst_token, sf_connection, claude_connection, mocker
+    ):
+        # Arrange
+        tool_resp = _make_tool_use_response("tu_1", "get_schema", {"level": "databases"})
+        text_resp = _make_text_response("You have DB1 and DB2.")
+        mock_create = MagicMock(side_effect=[tool_resp, text_resp])
+        mocker.patch(
+            "app.explore.router.anthropic.Anthropic",
+            return_value=MagicMock(messages=MagicMock(create=mock_create)),
+        )
+        _mock_sf(mocker, [("DB1",), ("DB2",)])
+        payload = {
+            "snowflake_connection_id": str(sf_connection.id),
+            "claude_connection_id": str(claude_connection.id),
+            "messages": [{"role": "user", "content": "What databases do I have?"}],
+        }
+        # Act
+        res = await client.post(
+            "/explore/chat",
+            json=payload,
+            cookies={"access_token": analyst_token},
+        )
+        # Assert
+        assert res.status_code == 200
+        assert res.json() == {"role": "assistant", "content": "You have DB1 and DB2."}
+        assert mock_create.call_count == 2
+
+    async def test_should_return_404_when_snowflake_connection_missing(
+        self, client, analyst_token, claude_connection
+    ):
+        # Arrange
+        payload = {
+            "snowflake_connection_id": str(uuid.uuid4()),
+            "claude_connection_id": str(claude_connection.id),
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+        # Act
+        res = await client.post(
+            "/explore/chat", json=payload, cookies={"access_token": analyst_token}
+        )
+        # Assert
+        assert res.status_code == 404
+
+    async def test_should_return_404_when_claude_connection_missing(
+        self, client, analyst_token, sf_connection
+    ):
+        # Arrange
+        payload = {
+            "snowflake_connection_id": str(sf_connection.id),
+            "claude_connection_id": str(uuid.uuid4()),
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+        # Act
+        res = await client.post(
+            "/explore/chat", json=payload, cookies={"access_token": analyst_token}
+        )
+        # Assert
+        assert res.status_code == 404
+
+    async def test_should_return_404_when_snowflake_connection_inactive(
+        self, client, analyst_token, sf_connection, claude_connection, session
+    ):
+        # Arrange
+        sf_connection.is_active = False
+        await session.commit()
+        payload = {
+            "snowflake_connection_id": str(sf_connection.id),
+            "claude_connection_id": str(claude_connection.id),
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+        # Act
+        res = await client.post(
+            "/explore/chat", json=payload, cookies={"access_token": analyst_token}
+        )
+        # Assert
+        assert res.status_code == 404
+
+    async def test_should_return_404_when_claude_connection_inactive(
+        self, client, analyst_token, sf_connection, claude_connection, session
+    ):
+        # Arrange
+        claude_connection.is_active = False
+        await session.commit()
+        payload = {
+            "snowflake_connection_id": str(sf_connection.id),
+            "claude_connection_id": str(claude_connection.id),
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+        # Act
+        res = await client.post(
+            "/explore/chat", json=payload, cookies={"access_token": analyst_token}
+        )
+        # Assert
+        assert res.status_code == 404
+
+    async def test_should_propagate_tool_error_gracefully(
+        self, client, analyst_token, sf_connection, claude_connection, mocker
+    ):
+        # Arrange
+        tool_resp = _make_tool_use_response("tu_1", "get_schema", {"level": "databases"})
+        text_resp = _make_text_response("I could not retrieve the schema.")
+        mock_create = MagicMock(side_effect=[tool_resp, text_resp])
+        mocker.patch(
+            "app.explore.router.anthropic.Anthropic",
+            return_value=MagicMock(messages=MagicMock(create=mock_create)),
+        )
+        mocker.patch(
+            "app.explore.schema_service.snowflake.connector.connect",
+            side_effect=snowflake.connector.errors.DatabaseError("connection refused"),
+        )
+        payload = {
+            "snowflake_connection_id": str(sf_connection.id),
+            "claude_connection_id": str(claude_connection.id),
+            "messages": [{"role": "user", "content": "What databases?"}],
+        }
+        # Act
+        res = await client.post(
+            "/explore/chat", json=payload, cookies={"access_token": analyst_token}
+        )
+        # Assert
+        assert res.status_code == 200
+        assert res.json()["role"] == "assistant"
+        assert mock_create.call_count == 2
+
+    async def test_should_return_error_message_when_max_iterations_exceeded(
+        self, client, analyst_token, sf_connection, claude_connection, mocker
+    ):
+        # Arrange — Claude always returns tool_use
+        tool_resp = _make_tool_use_response("tu_1", "get_schema", {"level": "databases"})
+        mock_create = MagicMock(return_value=tool_resp)
+        mocker.patch(
+            "app.explore.router.anthropic.Anthropic",
+            return_value=MagicMock(messages=MagicMock(create=mock_create)),
+        )
+        _mock_sf(mocker, [("DB1",)])
+        payload = {
+            "snowflake_connection_id": str(sf_connection.id),
+            "claude_connection_id": str(claude_connection.id),
+            "messages": [{"role": "user", "content": "What databases?"}],
+        }
+        # Act
+        res = await client.post(
+            "/explore/chat", json=payload, cookies={"access_token": analyst_token}
+        )
+        # Assert
+        assert res.status_code == 200
+        data = res.json()
+        assert data["role"] == "assistant"
+        assert "limit" in data["content"].lower() or "iterations" in data["content"].lower()
+        assert mock_create.call_count == 5
+
+    async def test_should_return_401_when_unauthenticated(
+        self, client, sf_connection, claude_connection
+    ):
+        # Arrange
+        payload = {
+            "snowflake_connection_id": str(sf_connection.id),
+            "claude_connection_id": str(claude_connection.id),
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+        # Act
+        res = await client.post("/explore/chat", json=payload)
+        # Assert
+        assert res.status_code == 401
+
+    async def test_should_allow_analyst_role(
+        self, client, analyst_token, sf_connection, claude_connection, mocker
+    ):
+        # Arrange
+        mocker.patch(
+            "app.explore.router.anthropic.Anthropic",
+            return_value=MagicMock(
+                messages=MagicMock(
+                    create=MagicMock(return_value=_make_text_response("OK"))
+                )
+            ),
+        )
+        payload = {
+            "snowflake_connection_id": str(sf_connection.id),
+            "claude_connection_id": str(claude_connection.id),
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+        # Act
+        res = await client.post(
+            "/explore/chat", json=payload, cookies={"access_token": analyst_token}
         )
         # Assert
         assert res.status_code == 200

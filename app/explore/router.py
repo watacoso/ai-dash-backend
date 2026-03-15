@@ -1,5 +1,6 @@
 """
 GET /explore/schema — Snowflake schema introspection endpoint.
+POST /explore/chat  — Claude tool-use loop with get_schema tool.
 """
 import asyncio
 import uuid
@@ -7,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from typing import Annotated
 
+import anthropic
 import snowflake.connector.errors
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
@@ -34,12 +36,44 @@ class SchemaResponse(BaseModel):
     items: list[str]
 
 
+_MAX_TOOL_ITERATIONS = 5
+
+_GET_SCHEMA_TOOL = {
+    "name": "get_schema",
+    "description": "Introspect a Snowflake account. Use level='databases' first, then narrow down.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "level": {
+                "type": "string",
+                "enum": ["databases", "schemas", "tables", "columns"],
+                "description": "Introspection level.",
+            },
+            "database": {"type": "string", "description": "Required for levels schemas/tables/columns."},
+            "schema": {"type": "string", "description": "Required for levels tables/columns."},
+            "table": {"type": "string", "description": "Required for level columns."},
+        },
+        "required": ["level"],
+    },
+}
+
+
 async def _get_active_sf_connection(
     connection_id: uuid.UUID,
     session: AsyncSession,
 ) -> Connection:
     conn = await session.get(Connection, connection_id)
     if not conn or not conn.is_active or conn.type != ConnectionType.snowflake:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
+    return conn
+
+
+async def _get_active_claude_connection(
+    connection_id: uuid.UUID,
+    session: AsyncSession,
+) -> Connection:
+    conn = await session.get(Connection, connection_id)
+    if not conn or not conn.is_active or conn.type != ConnectionType.claude:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
     return conn
 
@@ -81,3 +115,86 @@ async def get_schema(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
     return SchemaResponse(items=items)
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    snowflake_connection_id: uuid.UUID
+    claude_connection_id: uuid.UUID
+    messages: list[ChatMessage]
+
+
+class ChatResponse(BaseModel):
+    role: str
+    content: str
+
+
+def _run_tool(svc: SnowflakeSchemaService, tool_input: dict) -> str:
+    level = tool_input.get("level")
+    database = tool_input.get("database")
+    schema = tool_input.get("schema")
+    table = tool_input.get("table")
+    try:
+        if level == "databases":
+            items = svc.list_databases()
+        elif level == "schemas":
+            items = svc.list_schemas(database)
+        elif level == "tables":
+            items = svc.list_tables(database, schema)
+        else:
+            items = svc.list_columns(database, schema, table)
+        return ", ".join(items) if items else "(no results)"
+    except snowflake.connector.errors.DatabaseError as exc:
+        return f"Error: {exc}"
+
+
+@router.post("/chat", response_model=ChatResponse)
+async def post_chat(
+    body: ChatRequest,
+    db_session: AsyncSession = Depends(get_session),
+    _: User = Depends(get_current_user),
+) -> ChatResponse:
+    sf_conn = await _get_active_sf_connection(body.snowflake_connection_id, db_session)
+    cl_conn = await _get_active_claude_connection(body.claude_connection_id, db_session)
+
+    svc = SnowflakeSchemaService(sf_conn.credentials or {})
+    cl_creds = cl_conn.credentials or {}
+    client = anthropic.Anthropic(api_key=cl_creds["api_key"])
+    model = cl_creds["model"]
+
+    messages = [{"role": m.role, "content": m.content} for m in body.messages]
+
+    loop = asyncio.get_event_loop()
+    for _ in range(_MAX_TOOL_ITERATIONS):
+        response = client.messages.create(
+            model=model,
+            max_tokens=4096,
+            tools=[_GET_SCHEMA_TOOL],
+            messages=messages,
+        )
+
+        if response.stop_reason == "end_turn":
+            text = next(b.text for b in response.content if b.type == "text")
+            return ChatResponse(role="assistant", content=text)
+
+        # Process tool_use blocks
+        messages.append({"role": "assistant", "content": response.content})
+        tool_results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                result = await loop.run_in_executor(_executor, _run_tool, svc, block.input)
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result,
+                })
+        messages.append({"role": "user", "content": tool_results})
+
+    return ChatResponse(
+        role="assistant",
+        content="I reached the tool-use iterations limit and could not complete the request.",
+    )
