@@ -35,8 +35,8 @@ class TestSnowflakeSchemaService:
             yield
 
     def test_should_return_database_names(self):
-        # Arrange
-        conn = _mock_conn([("DB1",), ("DB2",)])
+        # Arrange — SHOW DATABASES: col 0 = created_on, col 1 = name
+        conn = _mock_conn([(None, "DB1"), (None, "DB2")])
         with patch("app.explore.schema_service.snowflake.connector.connect", return_value=conn):
             svc = SnowflakeSchemaService(CREDS)
             # Act
@@ -45,8 +45,8 @@ class TestSnowflakeSchemaService:
         assert result == ["DB1", "DB2"]
 
     def test_should_return_schema_names_for_database(self):
-        # Arrange
-        conn = _mock_conn([("PUBLIC",), ("RAW",)])
+        # Arrange — SHOW SCHEMAS: col 0 = created_on, col 1 = name
+        conn = _mock_conn([(None, "PUBLIC"), (None, "RAW")])
         with patch("app.explore.schema_service.snowflake.connector.connect", return_value=conn):
             svc = SnowflakeSchemaService(CREDS)
             # Act
@@ -55,8 +55,8 @@ class TestSnowflakeSchemaService:
         assert result == ["PUBLIC", "RAW"]
 
     def test_should_return_table_names_for_schema(self):
-        # Arrange
-        conn = _mock_conn([("ORDERS",), ("USERS",)])
+        # Arrange — SHOW TABLES: col 0 = created_on, col 1 = name
+        conn = _mock_conn([(None, "ORDERS"), (None, "USERS")])
         with patch("app.explore.schema_service.snowflake.connector.connect", return_value=conn):
             svc = SnowflakeSchemaService(CREDS)
             # Act
@@ -65,7 +65,7 @@ class TestSnowflakeSchemaService:
         assert result == ["ORDERS", "USERS"]
 
     def test_should_return_column_names_for_table(self):
-        # Arrange
+        # Arrange — SHOW COLUMNS: col 0 = column_name (no created_on prefix)
         conn = _mock_conn([("id",), ("amount",), ("created_at",)])
         with patch("app.explore.schema_service.snowflake.connector.connect", return_value=conn):
             svc = SnowflakeSchemaService(CREDS)
@@ -87,7 +87,7 @@ class TestSnowflakeSchemaService:
 
     def test_should_close_connection_after_successful_call(self):
         # Arrange
-        conn = _mock_conn([("DB1",)])
+        conn = _mock_conn([(None, "DB1")])
         with patch("app.explore.schema_service.snowflake.connector.connect", return_value=conn):
             svc = SnowflakeSchemaService(CREDS)
             # Act

@@ -7,10 +7,11 @@ Reset DB and Redis to a clean E2E baseline.
 Run: python -m app.auth.e2e_reset
 """
 import asyncio
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from app.database import AsyncSessionLocal
 from app.auth.models import Base, User, Role
 from app.auth.service import hash_password
+from app.connections.models import Connection
 from app.database import engine
 from app.redis import get_redis
 
@@ -36,6 +37,10 @@ async def e2e_reset() -> None:
         print(f"Redis: cleared {len(keys_to_del)} key(s)")
 
     async with AsyncSessionLocal() as session:
+        # Remove all connections (none should persist between E2E runs)
+        result = await session.execute(delete(Connection))
+        print(f"Connections: cleared {result.rowcount} row(s)")
+
         # Remove non-seed users
         result = await session.execute(select(User))
         for user in result.scalars().all():
