@@ -128,12 +128,19 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage]
 
 
+class LogEntry(BaseModel):
+    level: str
+    message: str
+
+
 class ChatResponse(BaseModel):
     role: str
     content: str
+    logs: list[LogEntry] = []
 
 
-def _run_tool(svc: SnowflakeSchemaService, tool_input: dict) -> str:
+def _run_tool(svc: SnowflakeSchemaService, tool_input: dict) -> tuple[str, bool]:
+    """Run a schema tool. Returns (result_string, is_error)."""
     level = tool_input.get("level")
     database = tool_input.get("database")
     schema = tool_input.get("schema")
@@ -147,9 +154,9 @@ def _run_tool(svc: SnowflakeSchemaService, tool_input: dict) -> str:
             items = svc.list_tables(database, schema)
         else:
             items = svc.list_columns(database, schema, table)
-        return ", ".join(items) if items else "(no results)"
+        return (", ".join(items) if items else "(no results)", False)
     except snowflake.connector.errors.DatabaseError as exc:
-        return f"Error: {exc}"
+        return (f"Error: {exc}", True)
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -167,6 +174,7 @@ async def post_chat(
     model = cl_creds["model"]
 
     messages = [{"role": m.role, "content": m.content} for m in body.messages]
+    logs: list[LogEntry] = []
 
     loop = asyncio.get_event_loop()
     for _ in range(_MAX_TOOL_ITERATIONS):
@@ -179,14 +187,20 @@ async def post_chat(
 
         if response.stop_reason == "end_turn":
             text = next(b.text for b in response.content if b.type == "text")
-            return ChatResponse(role="assistant", content=text)
+            return ChatResponse(role="assistant", content=text, logs=logs)
 
         # Process tool_use blocks
         messages.append({"role": "assistant", "content": response.content})
         tool_results = []
         for block in response.content:
             if block.type == "tool_use":
-                result = await loop.run_in_executor(_executor, _run_tool, svc, block.input)
+                params = ", ".join(f"{k}={v}" for k, v in block.input.items())
+                logs.append(LogEntry(level="INFO", message=f"Tool call: {block.name}({params})"))
+                result, is_error = await loop.run_in_executor(_executor, _run_tool, svc, block.input)
+                if is_error:
+                    logs.append(LogEntry(level="ERROR", message=result.removeprefix("Error: ")))
+                else:
+                    logs.append(LogEntry(level="INFO", message=f"Tool result: {result}"))
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
@@ -197,4 +211,5 @@ async def post_chat(
     return ChatResponse(
         role="assistant",
         content="I reached the tool-use iterations limit and could not complete the request.",
+        logs=logs,
     )

@@ -356,7 +356,9 @@ class TestChatEndpoint:
         )
         # Assert
         assert res.status_code == 200
-        assert res.json() == {"role": "assistant", "content": "Here are your results."}
+        data = res.json()
+        assert data["role"] == "assistant"
+        assert data["content"] == "Here are your results."
 
     async def test_should_return_assistant_message_after_one_tool_call(
         self, client, analyst_token, sf_connection, claude_connection, mocker
@@ -383,7 +385,9 @@ class TestChatEndpoint:
         )
         # Assert
         assert res.status_code == 200
-        assert res.json() == {"role": "assistant", "content": "You have DB1 and DB2."}
+        data = res.json()
+        assert data["role"] == "assistant"
+        assert data["content"] == "You have DB1 and DB2."
         assert mock_create.call_count == 2
 
     async def test_should_return_404_when_snowflake_connection_missing(
@@ -548,3 +552,111 @@ class TestChatEndpoint:
         )
         # Assert
         assert res.status_code == 200
+
+    # --- TKT-0019: logs field ---
+
+    async def test_should_include_empty_logs_when_no_tool_calls(
+        self, client, analyst_token, sf_connection, claude_connection, mocker
+    ):
+        # Arrange
+        mocker.patch(
+            "app.explore.router.anthropic.Anthropic",
+            return_value=MagicMock(
+                messages=MagicMock(create=MagicMock(return_value=_make_text_response("Done.")))
+            ),
+        )
+        payload = {
+            "snowflake_connection_id": str(sf_connection.id),
+            "claude_connection_id": str(claude_connection.id),
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+        # Act
+        res = await client.post("/explore/chat", json=payload, cookies={"access_token": analyst_token})
+        # Assert
+        assert res.status_code == 200
+        assert res.json()["logs"] == []
+
+    async def test_should_add_info_log_for_each_tool_call(
+        self, client, analyst_token, sf_connection, claude_connection, mocker
+    ):
+        # Arrange
+        tool_resp = _make_tool_use_response("tu_1", "get_schema", {"level": "databases"})
+        text_resp = _make_text_response("You have DB1.")
+        mocker.patch(
+            "app.explore.router.anthropic.Anthropic",
+            return_value=MagicMock(
+                messages=MagicMock(create=MagicMock(side_effect=[tool_resp, text_resp]))
+            ),
+        )
+        _mock_sf(mocker, [(None, "DB1")])
+        payload = {
+            "snowflake_connection_id": str(sf_connection.id),
+            "claude_connection_id": str(claude_connection.id),
+            "messages": [{"role": "user", "content": "What databases?"}],
+        }
+        # Act
+        res = await client.post("/explore/chat", json=payload, cookies={"access_token": analyst_token})
+        # Assert
+        assert res.status_code == 200
+        logs = res.json()["logs"]
+        info_logs = [l for l in logs if l["level"] == "INFO"]
+        assert len(info_logs) >= 1
+        assert any("get_schema" in l["message"] for l in info_logs)
+
+    async def test_should_add_error_log_when_tool_returns_error(
+        self, client, analyst_token, sf_connection, claude_connection, mocker
+    ):
+        # Arrange
+        tool_resp = _make_tool_use_response("tu_1", "get_schema", {"level": "databases"})
+        text_resp = _make_text_response("I could not retrieve schemas.")
+        mocker.patch(
+            "app.explore.router.anthropic.Anthropic",
+            return_value=MagicMock(
+                messages=MagicMock(create=MagicMock(side_effect=[tool_resp, text_resp]))
+            ),
+        )
+        mocker.patch("app.explore.schema_service._load_private_key_bytes", return_value=b"fake-key")
+        mocker.patch(
+            "app.explore.schema_service.snowflake.connector.connect",
+            side_effect=snowflake.connector.errors.DatabaseError("auth failed"),
+        )
+        payload = {
+            "snowflake_connection_id": str(sf_connection.id),
+            "claude_connection_id": str(claude_connection.id),
+            "messages": [{"role": "user", "content": "What databases?"}],
+        }
+        # Act
+        res = await client.post("/explore/chat", json=payload, cookies={"access_token": analyst_token})
+        # Assert
+        assert res.status_code == 200
+        logs = res.json()["logs"]
+        error_logs = [l for l in logs if l["level"] == "ERROR"]
+        assert len(error_logs) >= 1
+        assert any("auth failed" in l["message"] for l in error_logs)
+
+    async def test_should_log_tool_call_before_result(
+        self, client, analyst_token, sf_connection, claude_connection, mocker
+    ):
+        # Arrange
+        tool_resp = _make_tool_use_response("tu_1", "get_schema", {"level": "databases"})
+        text_resp = _make_text_response("Done.")
+        mocker.patch(
+            "app.explore.router.anthropic.Anthropic",
+            return_value=MagicMock(
+                messages=MagicMock(create=MagicMock(side_effect=[tool_resp, text_resp]))
+            ),
+        )
+        _mock_sf(mocker, [(None, "DB1")])
+        payload = {
+            "snowflake_connection_id": str(sf_connection.id),
+            "claude_connection_id": str(claude_connection.id),
+            "messages": [{"role": "user", "content": "What databases?"}],
+        }
+        # Act
+        res = await client.post("/explore/chat", json=payload, cookies={"access_token": analyst_token})
+        # Assert
+        assert res.status_code == 200
+        logs = res.json()["logs"]
+        assert len(logs) >= 2
+        # First log should mention the call, second the result
+        assert "get_schema" in logs[0]["message"]
