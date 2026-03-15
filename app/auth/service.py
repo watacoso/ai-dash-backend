@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
@@ -18,6 +19,7 @@ def create_token(user_id: str, role: str) -> str:
     payload = {
         "sub": user_id,
         "role": role,
+        "jti": str(uuid.uuid4()),  # unique per token — prevents blocklist collisions
         "exp": datetime.now(timezone.utc) + timedelta(seconds=settings.jwt_expiry_seconds),
     }
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
