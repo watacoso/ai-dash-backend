@@ -253,8 +253,9 @@ class TestSettings:
 
     def test_missing_encryption_key_raises(self):
         from pydantic import ValidationError
-        # Remove key if set, ensure it raises
+        # Pop from env and disable .env file loading so pydantic-settings
+        # cannot find the key from either source
         os.environ.pop("ENCRYPTION_KEY", None)
         from app.config import Settings
         with pytest.raises((ValidationError, ValueError)):
-            Settings()
+            Settings(_env_file=None)
