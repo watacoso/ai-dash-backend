@@ -10,7 +10,7 @@ dev-down: ## Stop and remove dev containers.
 
 ## ── Dev server ────────────────────────────────────────────────────────────────
 
-dev: ## Start uvicorn with hot reload.
+dev: seed seed-live-connections ## Seed users + live connections, then start uvicorn with hot reload.
 	.venv/bin/uvicorn app.main:app --reload
 
 ## ── Database ──────────────────────────────────────────────────────────────────
