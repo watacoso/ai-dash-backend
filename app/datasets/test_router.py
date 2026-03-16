@@ -618,3 +618,164 @@ class TestRunDataset:
             cookies={"access_token": analyst_token},
         )
         assert res.status_code == 200
+
+
+# ── Chat endpoints ────────────────────────────────────────────────────────────
+
+def _make_text_response(text: str) -> MagicMock:
+    block = MagicMock()
+    block.type = "text"
+    block.text = text
+    resp = MagicMock()
+    resp.stop_reason = "end_turn"
+    resp.content = [block]
+    return resp
+
+
+def _mock_anthropic(mocker, text: str, module: str = "app.datasets.router"):
+    mocker.patch(
+        f"{module}.anthropic.Anthropic",
+        return_value=MagicMock(
+            messages=MagicMock(create=MagicMock(return_value=_make_text_response(text)))
+        ),
+    )
+
+
+def _chat_payload(sf_id, cl_id, messages=None, sql="SELECT 1", name="", description=""):
+    return {
+        "snowflake_connection_id": str(sf_id),
+        "claude_connection_id": str(cl_id),
+        "messages": messages or [{"role": "user", "content": "describe this dataset"}],
+        "sql": sql,
+        "name": name,
+        "description": description,
+    }
+
+
+class TestDatasetChatEndpoints:
+    async def _create_dataset(self, client, analyst_token, sf_id, cl_id):
+        res = await client.post(
+            "/datasets",
+            json={
+                "name": "ds",
+                "sql": "SELECT 1",
+                "snowflake_connection_id": str(sf_id),
+                "claude_connection_id": str(cl_id),
+            },
+            cookies={"access_token": analyst_token},
+        )
+        return res.json()["id"]
+
+    async def test_adhoc_chat_returns_assistant_message(
+        self, client, analyst_token, sf_connection, cl_connection, mocker
+    ):
+        _mock_anthropic(mocker, "This dataset returns a count.")
+        res = await client.post(
+            "/datasets/chat",
+            json=_chat_payload(sf_connection.id, cl_connection.id),
+            cookies={"access_token": analyst_token},
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["role"] == "assistant"
+        assert "count" in data["content"]
+
+    async def test_adhoc_chat_returns_sql_update(
+        self, client, analyst_token, sf_connection, cl_connection, mocker
+    ):
+        _mock_anthropic(mocker, "Updated query:\n```sql\nSELECT 2\n```")
+        res = await client.post(
+            "/datasets/chat",
+            json=_chat_payload(sf_connection.id, cl_connection.id),
+            cookies={"access_token": analyst_token},
+        )
+        assert res.status_code == 200
+        assert res.json()["sql_update"] == "SELECT 2"
+
+    async def test_adhoc_chat_returns_name_update(
+        self, client, analyst_token, sf_connection, cl_connection, mocker
+    ):
+        _mock_anthropic(mocker, "I suggest: **Name:** Order Summary")
+        res = await client.post(
+            "/datasets/chat",
+            json=_chat_payload(sf_connection.id, cl_connection.id),
+            cookies={"access_token": analyst_token},
+        )
+        assert res.status_code == 200
+        assert res.json()["name_update"] == "Order Summary"
+
+    async def test_adhoc_chat_returns_description_update(
+        self, client, analyst_token, sf_connection, cl_connection, mocker
+    ):
+        _mock_anthropic(mocker, "**Description:** Shows order totals by month")
+        res = await client.post(
+            "/datasets/chat",
+            json=_chat_payload(sf_connection.id, cl_connection.id),
+            cookies={"access_token": analyst_token},
+        )
+        assert res.status_code == 200
+        assert res.json()["description_update"] == "Shows order totals by month"
+
+    async def test_adhoc_chat_no_updates_when_none_present(
+        self, client, analyst_token, sf_connection, cl_connection, mocker
+    ):
+        _mock_anthropic(mocker, "Looks good to me.")
+        res = await client.post(
+            "/datasets/chat",
+            json=_chat_payload(sf_connection.id, cl_connection.id),
+            cookies={"access_token": analyst_token},
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["sql_update"] is None
+        assert data["name_update"] is None
+        assert data["description_update"] is None
+
+    async def test_saved_chat_returns_200_and_updates_models_used(
+        self, client, analyst_token, sf_connection, cl_connection, session, mocker
+    ):
+        _mock_anthropic(mocker, "Looks good.")
+        ds_id = await self._create_dataset(client, analyst_token, sf_connection.id, cl_connection.id)
+        res = await client.post(
+            f"/datasets/{ds_id}/chat",
+            json=_chat_payload(sf_connection.id, cl_connection.id),
+            cookies={"access_token": analyst_token},
+        )
+        assert res.status_code == 200
+        # models_used should now contain the model name
+        ds_res = await client.get(f"/datasets/{ds_id}", cookies={"access_token": analyst_token})
+        assert "claude-sonnet-4-6" in ds_res.json()["models_used"]
+
+    async def test_saved_chat_dedupes_model_in_models_used(
+        self, client, analyst_token, sf_connection, cl_connection, session, mocker
+    ):
+        _mock_anthropic(mocker, "Looks good.")
+        ds_id = await self._create_dataset(client, analyst_token, sf_connection.id, cl_connection.id)
+        payload = _chat_payload(sf_connection.id, cl_connection.id)
+        cookies = {"access_token": analyst_token}
+        await client.post(f"/datasets/{ds_id}/chat", json=payload, cookies=cookies)
+        await client.post(f"/datasets/{ds_id}/chat", json=payload, cookies=cookies)
+        ds_res = await client.get(f"/datasets/{ds_id}", cookies=cookies)
+        assert ds_res.json()["models_used"].count("claude-sonnet-4-6") == 1
+
+    async def test_saved_chat_returns_404_for_unknown_id(
+        self, client, analyst_token, sf_connection, cl_connection, mocker
+    ):
+        _mock_anthropic(mocker, "ok")
+        res = await client.post(
+            f"/datasets/{uuid.uuid4()}/chat",
+            json=_chat_payload(sf_connection.id, cl_connection.id),
+            cookies={"access_token": analyst_token},
+        )
+        assert res.status_code == 404
+
+    async def test_route_ordering_chat_not_confused_with_dataset_id(
+        self, client, analyst_token, sf_connection, cl_connection, mocker
+    ):
+        _mock_anthropic(mocker, "ok")
+        res = await client.post(
+            "/datasets/chat",
+            json=_chat_payload(sf_connection.id, cl_connection.id),
+            cookies={"access_token": analyst_token},
+        )
+        assert res.status_code == 200
