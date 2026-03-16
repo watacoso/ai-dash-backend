@@ -1,0 +1,24 @@
+{
+  "name": "ai-dash-backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/watacoso/ai-dash-backend.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/watacoso/ai-dash-backend/issues"
+  },
+  "homepage": "https://github.com/watacoso/ai-dash-backend#readme",
+  "dependencies": {
+    "d3-node": "^4.0.1"
+  }
+}
