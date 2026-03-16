@@ -4,6 +4,7 @@ Run: python -m app.auth.db_create
 """
 import asyncio
 from app.auth.models import Base
+from app.charts.models import Chart  # noqa: F401
 from app.connections.models import Connection  # noqa: F401
 from app.datasets.models import Dataset  # noqa: F401
 from app.database import engine
