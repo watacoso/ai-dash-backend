@@ -11,6 +11,7 @@ from sqlalchemy import select, delete
 from app.database import AsyncSessionLocal
 from app.auth.models import Base, User, Role
 from app.auth.service import hash_password
+from app.charts.models import Chart
 from app.connections.models import Connection
 from app.datasets.models import Dataset
 from app.database import engine
@@ -38,7 +39,11 @@ async def e2e_reset() -> None:
         print(f"Redis: cleared {len(keys_to_del)} key(s)")
 
     async with AsyncSessionLocal() as session:
-        # Remove datasets first (FK refs connections)
+        # Remove charts first (FK refs datasets)
+        result = await session.execute(delete(Chart))
+        print(f"Charts: cleared {result.rowcount} row(s)")
+
+        # Remove datasets (FK refs connections)
         result = await session.execute(delete(Dataset))
         print(f"Datasets: cleared {result.rowcount} row(s)")
 
