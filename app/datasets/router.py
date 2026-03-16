@@ -1,7 +1,11 @@
+import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 
+import snowflake.connector.errors
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +15,9 @@ from app.auth.router import get_current_user
 from app.connections.models import Connection
 from app.database import get_session
 from app.datasets.models import Dataset
+from app.query.query_service import SnowflakeQueryService
+
+_executor = ThreadPoolExecutor(max_workers=4)
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
@@ -151,3 +158,77 @@ async def delete_dataset(
     ds = await _get_or_404(session, dataset_id)
     await session.delete(ds)
     await session.commit()
+
+
+# ── Run helpers ────────────────────────────────────────────────────────────────
+
+class RunPayload(BaseModel):
+    sql: str
+    snowflake_connection_id: uuid.UUID
+
+
+class RunResponse(BaseModel):
+    columns: list[str]
+    rows: list[list]
+    row_count: int
+    duration_ms: int
+    executed_at: str
+
+
+class RunErrorResponse(BaseModel):
+    error: str
+
+
+async def _execute_run(
+    session: AsyncSession, connection_id: uuid.UUID, sql: str
+) -> RunResponse:
+    import asyncio
+    conn = await session.get(Connection, connection_id)
+    if not conn:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
+    svc = SnowflakeQueryService(conn.credentials or {})
+    executed_at = datetime.now(timezone.utc).isoformat()
+    start = time.monotonic()
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(_executor, svc.execute_sample, sql)
+    except (
+        snowflake.connector.errors.DatabaseError,
+        snowflake.connector.errors.ProgrammingError,
+    ) as exc:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={"error": str(exc)},
+        )
+    duration_ms = int((time.monotonic() - start) * 1000)
+    return RunResponse(
+        columns=result["columns"],
+        rows=result["rows"],
+        row_count=len(result["rows"]),
+        duration_ms=duration_ms,
+        executed_at=executed_at,
+    )
+
+
+# ── POST /datasets/run (ad-hoc) ────────────────────────────────────────────────
+# Must be registered before /{dataset_id}/run to avoid "run" matching as a UUID.
+
+@router.post("/run")
+async def run_adhoc(
+    body: RunPayload,
+    session: AsyncSession = Depends(get_session),
+    _: User = Depends(get_current_user),
+):
+    return await _execute_run(session, body.snowflake_connection_id, body.sql)
+
+
+# ── POST /datasets/{id}/run (saved dataset) ────────────────────────────────────
+
+@router.post("/{dataset_id}/run")
+async def run_saved(
+    dataset_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    _: User = Depends(get_current_user),
+):
+    ds = await _get_or_404(session, dataset_id)
+    return await _execute_run(session, ds.snowflake_connection_id, ds.sql)
