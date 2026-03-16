@@ -1,6 +1,8 @@
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
+import snowflake.connector.errors
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -445,3 +447,174 @@ class TestDeleteDataset:
         ds_id = await self._create(client, analyst_token, sf_connection.id)
         res = await client.delete(f"/datasets/{ds_id}")
         assert res.status_code == 401
+
+
+# ── POST /datasets/run + POST /datasets/{id}/run ───────────────────────────────
+
+def _mock_execute_sample(mocker, columns=None, rows=None):
+    """Patch SnowflakeQueryService.execute_sample to return a canned result."""
+    columns = columns or ["id", "name"]
+    rows = rows or [[1, "foo"], [2, "bar"]]
+    mock_svc = MagicMock()
+    mock_svc.execute_sample.return_value = {"columns": columns, "rows": rows}
+    mocker.patch(
+        "app.datasets.router.SnowflakeQueryService",
+        return_value=mock_svc,
+    )
+    return mock_svc
+
+
+class TestRunDataset:
+    async def _create_dataset(self, client, token, sf_id, sql="SELECT id FROM orders"):
+        res = await client.post(
+            "/datasets",
+            json={"name": "run-ds", "sql": sql, "snowflake_connection_id": str(sf_id)},
+            cookies={"access_token": token},
+        )
+        return res.json()["id"]
+
+    async def test_should_execute_sql_and_return_result_shape(
+        self, client, analyst_token, sf_connection, mocker
+    ):
+        _mock_execute_sample(mocker, columns=["id"], rows=[[1], [2]])
+        res = await client.post(
+            "/datasets/run",
+            json={"sql": "SELECT id FROM t", "snowflake_connection_id": str(sf_connection.id)},
+            cookies={"access_token": analyst_token},
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["columns"] == ["id"]
+        assert data["rows"] == [[1], [2]]
+        assert data["row_count"] == 2
+        assert isinstance(data["duration_ms"], int) and data["duration_ms"] >= 0
+        assert "executed_at" in data
+
+    async def test_should_use_snowflake_connection_id_from_body(
+        self, client, analyst_token, sf_connection, mocker
+    ):
+        mock_svc = _mock_execute_sample(mocker)
+        await client.post(
+            "/datasets/run",
+            json={"sql": "SELECT 1", "snowflake_connection_id": str(sf_connection.id)},
+            cookies={"access_token": analyst_token},
+        )
+        mock_svc.execute_sample.assert_called_once_with("SELECT 1")
+
+    async def test_should_return_422_with_error_on_database_error(
+        self, client, analyst_token, sf_connection, mocker
+    ):
+        mock_svc = MagicMock()
+        mock_svc.execute_sample.side_effect = snowflake.connector.errors.DatabaseError("bad sql")
+        mocker.patch("app.datasets.router.SnowflakeQueryService", return_value=mock_svc)
+        res = await client.post(
+            "/datasets/run",
+            json={"sql": "SELECT bad", "snowflake_connection_id": str(sf_connection.id)},
+            cookies={"access_token": analyst_token},
+        )
+        assert res.status_code == 422
+        assert "error" in res.json()
+
+    async def test_should_return_422_with_error_on_programming_error(
+        self, client, analyst_token, sf_connection, mocker
+    ):
+        mock_svc = MagicMock()
+        mock_svc.execute_sample.side_effect = snowflake.connector.errors.ProgrammingError("syntax")
+        mocker.patch("app.datasets.router.SnowflakeQueryService", return_value=mock_svc)
+        res = await client.post(
+            "/datasets/run",
+            json={"sql": "SELEKT bad", "snowflake_connection_id": str(sf_connection.id)},
+            cookies={"access_token": analyst_token},
+        )
+        assert res.status_code == 422
+        assert "error" in res.json()
+
+    async def test_should_return_404_when_adhoc_connection_not_found(
+        self, client, analyst_token
+    ):
+        res = await client.post(
+            "/datasets/run",
+            json={"sql": "SELECT 1", "snowflake_connection_id": str(uuid.uuid4())},
+            cookies={"access_token": analyst_token},
+        )
+        assert res.status_code == 404
+
+    async def test_should_return_401_when_adhoc_unauthenticated(self, client, sf_connection):
+        res = await client.post(
+            "/datasets/run",
+            json={"sql": "SELECT 1", "snowflake_connection_id": str(sf_connection.id)},
+        )
+        assert res.status_code == 401
+
+    async def test_should_run_saved_dataset_using_stored_connection(
+        self, client, analyst_token, sf_connection, mocker
+    ):
+        mock_svc = _mock_execute_sample(mocker)
+        ds_id = await self._create_dataset(
+            client, analyst_token, sf_connection.id, sql="SELECT id FROM orders"
+        )
+        await client.post(
+            f"/datasets/{ds_id}/run",
+            cookies={"access_token": analyst_token},
+        )
+        mock_svc.execute_sample.assert_called_once_with("SELECT id FROM orders")
+
+    async def test_should_return_result_shape_for_saved_dataset(
+        self, client, analyst_token, sf_connection, mocker
+    ):
+        _mock_execute_sample(mocker, columns=["x"], rows=[[42]])
+        ds_id = await self._create_dataset(client, analyst_token, sf_connection.id)
+        res = await client.post(
+            f"/datasets/{ds_id}/run",
+            cookies={"access_token": analyst_token},
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["columns"] == ["x"]
+        assert data["row_count"] == 1
+        assert isinstance(data["duration_ms"], int)
+        assert "executed_at" in data
+
+    async def test_should_return_422_on_snowflake_error_for_saved_dataset(
+        self, client, analyst_token, sf_connection, mocker
+    ):
+        mock_svc = MagicMock()
+        mock_svc.execute_sample.side_effect = snowflake.connector.errors.DatabaseError("err")
+        mocker.patch("app.datasets.router.SnowflakeQueryService", return_value=mock_svc)
+        ds_id = await self._create_dataset(client, analyst_token, sf_connection.id)
+        res = await client.post(
+            f"/datasets/{ds_id}/run",
+            cookies={"access_token": analyst_token},
+        )
+        assert res.status_code == 422
+        assert "error" in res.json()
+
+    async def test_should_return_404_when_saved_dataset_not_found(
+        self, client, analyst_token
+    ):
+        res = await client.post(
+            f"/datasets/{uuid.uuid4()}/run",
+            cookies={"access_token": analyst_token},
+        )
+        assert res.status_code == 404
+
+    async def test_should_return_401_when_saved_run_unauthenticated(
+        self, client, analyst_token, sf_connection
+    ):
+        ds_id = await self._create_dataset(client, analyst_token, sf_connection.id)
+        res = await client.post(f"/datasets/{ds_id}/run")
+        assert res.status_code == 401
+
+    async def test_should_not_confuse_run_literal_with_dataset_id(
+        self, client, analyst_token, sf_connection, mocker
+    ):
+        # POST /datasets/run with a valid payload must NOT be routed to
+        # POST /datasets/{dataset_id} (which would 422 on UUID parse of "run").
+        # A 200 here confirms the literal route is registered first.
+        _mock_execute_sample(mocker)
+        res = await client.post(
+            "/datasets/run",
+            json={"sql": "SELECT 1", "snowflake_connection_id": str(sf_connection.id)},
+            cookies={"access_token": analyst_token},
+        )
+        assert res.status_code == 200
