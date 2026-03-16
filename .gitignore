@@ -19,3 +19,4 @@ test-results/
 
 # OS
 .DS_Store
+node_modules/
