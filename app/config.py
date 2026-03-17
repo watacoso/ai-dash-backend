@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expiry_seconds: int = 3600
     encryption_key: str  # required — no default; startup fails if missing
+    schema_tree_ttl_seconds: int = 300
 
 
 settings = Settings()
