@@ -1,5 +1,7 @@
 import asyncio
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import anthropic
@@ -11,9 +13,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.models import User
 from app.auth.router import get_current_user, require_role
+from app.config import settings
 from app.connections.models import Connection, ConnectionType
 from app.connections.probe import run_snowflake_probe, run_claude_probe
 from app.database import get_session
+from app.explore.schema_service import SnowflakeSchemaService
+
+_tree_executor = ThreadPoolExecutor(max_workers=4)
+# Cache: connection_id (str) → (expiry_timestamp, tree_dict)
+_schema_tree_cache: dict[str, tuple[float, dict]] = {}
 
 router = APIRouter(prefix="/connections", tags=["connections"])
 
@@ -216,3 +224,64 @@ async def test_connection(
         return TestResult(ok=False, error=str(exc))
     except Exception as exc:
         return TestResult(ok=False, error=str(exc))
+
+
+# ── GET /connections/{id}/schema-tree ─────────────────────────────────────────
+
+class SchemaTreeTable(BaseModel):
+    name: str
+
+
+class SchemaTreeSchema(BaseModel):
+    name: str
+    tables: list[str]
+
+
+class SchemaTreeDatabase(BaseModel):
+    name: str
+    schemas: list[SchemaTreeSchema]
+
+
+class SchemaTreeResponse(BaseModel):
+    databases: list[SchemaTreeDatabase]
+
+
+def _build_tree(svc: SnowflakeSchemaService) -> dict:
+    databases = svc.list_databases()
+    result = []
+    for db in databases:
+        schemas = svc.list_schemas(db)
+        schema_list = []
+        for schema in schemas:
+            tables = svc.list_tables(db, schema)
+            schema_list.append({"name": schema, "tables": tables})
+        result.append({"name": db, "schemas": schema_list})
+    return {"databases": result}
+
+
+@router.get("/{connection_id}/schema-tree", response_model=SchemaTreeResponse)
+async def get_schema_tree(
+    connection_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    _: User = Depends(get_current_user),
+) -> SchemaTreeResponse:
+    conn = await session.get(Connection, connection_id)
+    if not conn or not conn.is_active or conn.type != ConnectionType.snowflake:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
+
+    cache_key = str(connection_id)
+    now = time.monotonic()
+    if cache_key in _schema_tree_cache:
+        expiry, tree = _schema_tree_cache[cache_key]
+        if now < expiry:
+            return SchemaTreeResponse(**tree)
+
+    svc = SnowflakeSchemaService(conn.credentials or {})
+    loop = asyncio.get_event_loop()
+    try:
+        tree = await loop.run_in_executor(_tree_executor, _build_tree, svc)
+    except snowflake.connector.errors.DatabaseError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+
+    _schema_tree_cache[cache_key] = (now + settings.schema_tree_ttl_seconds, tree)
+    return SchemaTreeResponse(**tree)
